@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AdVoid</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="card" id="card">
+    <header class="head">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            <path d="M9 12l2 2 4-4"></path>
+          </svg>
+        </span>
+        <span class="title">AdVoid</span>
+      </div>
+
+      <label class="switch" title="Enable / disable">
+        <input type="checkbox" id="toggle" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <section class="status" id="status">
+      <span class="dot" id="dot"></span>
+      <span class="status-text" id="statusText">Active</span>
+    </section>
+
+    <section class="counter">
+      <div class="count" id="count">0</div>
+      <div class="count-label">ads blocked</div>
+    </section>
+
+    <footer class="foot">
+      <span>Network + on-page filtering</span>
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

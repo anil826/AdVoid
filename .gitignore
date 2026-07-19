@@ -1,0 +1,6 @@
+# Chrome-generated ruleset cache (created when the unpacked extension is loaded)
+_metadata/
+
+# OS junk
+Thumbs.db
+.DS_Store
