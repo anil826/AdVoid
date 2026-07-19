@@ -1,16 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "AdVoid — YouTube Ad Blocker",
-  "version": "1.0.1",
+  "name": "AdVoid — Ad Blocker for YouTube",
+  "version": "1.0.2",
   "description": "Blocks, skips, and hides YouTube ads using declarative network filtering and real-time DOM interaction.",
   "permissions": [
     "declarativeNetRequest",
-    "storage",
-    "scripting"
-  ],
-  "host_permissions": [
-    "*://*.youtube.com/*",
-    "*://*.doubleclick.net/*"
+    "storage"
   ],
   "background": {
     "service_worker": "background.js"
