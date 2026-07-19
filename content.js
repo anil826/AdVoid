@@ -160,6 +160,10 @@
     const video = getVideo();
     if (!video) return;
 
+    if (!video.__adVoidBound) {
+      bindVideoEvents(video);
+    }
+
     if (!adIsShowing()) {
       // Ad finished — restore state.
       if (saved) {
@@ -243,13 +247,16 @@
   }
 
   // Also bind to the video's own timeupdate — cheap and fires during ads.
-  function bindVideoEvents() {
-    const video = getVideo();
+  function bindVideoEvents(video) {
+    if (!video) video = getVideo();
     if (!video || video.__adVoidBound) return;
     try {
       video.__adVoidBound = true;
       video.addEventListener("timeupdate", scheduleScan, { passive: true });
       video.addEventListener("loadedmetadata", scheduleScan, { passive: true });
+      video.addEventListener("durationchange", scheduleScan, { passive: true });
+      video.addEventListener("play", scheduleScan, { passive: true });
+      video.addEventListener("playing", scheduleScan, { passive: true });
     } catch (_) {}
   }
 
