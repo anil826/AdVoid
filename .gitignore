@@ -4,3 +4,6 @@ _metadata/
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Release build artifacts
+AdVoid-v*.zip
