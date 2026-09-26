@@ -6,13 +6,16 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../content.
 
 function media(overrides = {}) {
   const listeners = new Map();
-  return Object.assign({
+  const result = Object.assign({
     playbackRate: 1.5, muted: false, duration: 120, currentTime: 12,
     currentSrc: 'blob:content', readyState: 4,
     addEventListener(name, fn) { listeners.set(name, fn); },
     removeEventListener(name) { listeners.delete(name); },
     emit(name) { listeners.get(name)?.(); }
   }, overrides);
+  result.buffered ??= { length: 1, start: () => 0, end: () => result.duration };
+  result.seekable ??= { length: 1, start: () => 0, end: () => result.duration };
+  return result;
 }
 function harness({ enabled = true, ad = false, noRoot = false, initialVideo = media(), deferStorage = false } = {}) {
   let style, storageListener, storageRead, now = 0;
@@ -31,7 +34,8 @@ function harness({ enabled = true, ad = false, noRoot = false, initialVideo = me
     querySelector() { return this.activePlayer; },
     getElementById() { return style; },
     createElement() { return { remove() { style = undefined; } }; },
-    addEventListener(name, fn) { events.set(name, fn); }
+    addEventListener(name, fn) { events.set(name, fn); },
+    dispatchEvent(event) { events.get(event.type)?.(event); }
   };
   class Observer {
     constructor(fn) { this.fn = fn; observers.push(this); }
@@ -41,6 +45,7 @@ function harness({ enabled = true, ad = false, noRoot = false, initialVideo = me
   }
   const context = {
     window: {}, document, MutationObserver: Observer,
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     performance: { now: () => now },
     getComputedStyle: button => ({ display: 'block', visibility: button.visibility || 'visible' }),
     queueMicrotask: fn => microtasks.push(fn),
@@ -186,6 +191,26 @@ test('ad-only timer catches a newly available skip button without mutations', ()
   assert.equal(skip.clicks, 1, 'rate-limit clicks on the same button');
 });
 
+test('fallback never seeks into an unbuffered ad segment', () => {
+  const video = media({ currentSrc: 'blob:ad', currentTime: 0, duration: 30,
+    buffered: { length: 1, start: () => 0, end: () => 2 } });
+  const h = harness({ ad: true, initialVideo: video });
+  assert.equal(video.currentTime, 0);
+  assert.equal(video.playbackRate, 16);
+  video.buffered.end = () => 30;
+  h.tick();
+  assert.equal(video.currentTime, 29.95);
+  video.currentTime = 1;
+  h.tick(); h.tick(); h.tick();
+  assert.equal(video.currentTime, 1, 'do not repeatedly seek when the player resets a clip');
+});
+
+test('fallback does not seek an unseekable ad even if buffered', () => {
+  const video = media({ currentSrc: 'blob:ad', seekable: { length: 0 } });
+  harness({ ad: true, initialVideo: video });
+  assert.equal(video.currentTime, 12);
+});
+
 test('unknown/live durations and interrupting-only states never seek', () => {
   for (const duration of [NaN, Infinity, 0, 600]) {
     const h = harness({ ad: true, initialVideo: media({ duration }) });
@@ -211,10 +236,10 @@ test('manifest covers standard and privacy-enhanced embeds; referenced files exi
   const path = require('node:path');
   const root = path.join(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json')));
-  const script = manifest.content_scripts[0];
+  const script = manifest.content_scripts.find(entry => entry.js.includes('content.js'));
   assert.equal(script.all_frames, true);
   assert.ok(script.matches.includes('*://*.youtube-nocookie.com/*'));
-  for (const file of [...script.js, manifest.background.service_worker, ...manifest.declarative_net_request.rule_resources.map(r => r.path)]) {
+  for (const file of [...manifest.content_scripts.flatMap(entry => entry.js), manifest.background.service_worker, ...manifest.declarative_net_request.rule_resources.map(r => r.path)]) {
     assert.ok(fs.existsSync(path.join(root, file)));
   }
   const rules = JSON.parse(fs.readFileSync(path.join(root, 'rules.json')));

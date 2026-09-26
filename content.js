@@ -34,6 +34,11 @@
   let lastClick = -Infinity;
   let lastSeek = -Infinity;
 
+  function syncResponseFilter() {
+    document.dispatchEvent(new CustomEvent("advoid:response-filter-state", { detail: enabled }));
+  }
+  document.addEventListener("advoid:response-filter-ready", syncResponseFilter);
+
   function injectStyle() {
     if (!enabled || !document.documentElement || document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
@@ -104,6 +109,14 @@
     return false;
   }
 
+  function containsTime(ranges, time) {
+    if (!ranges) return false;
+    for (let index = 0; index < ranges.length; index++) {
+      if (ranges.start(index) <= time && time < ranges.end(index)) return true;
+    }
+    return false;
+  }
+
   function handleAd() {
     if (!enabled || !player) return;
     if (!inAd()) {
@@ -113,7 +126,7 @@
     }
     retryAd();
     if (video && !session) {
-      session = { video, rate: video.playbackRate, muted: video.muted, handled: false };
+      session = { video, rate: video.playbackRate, muted: video.muted, handled: false, soughtSource: "" };
     }
     if (clickSkip()) {
       if (session) session.handled = true;
@@ -138,9 +151,16 @@
     session.handled = true;
     try {
       const now = performance.now();
-      if (now - lastSeek >= 250 && video.currentTime < duration - 0.1) {
+      const target = Math.max(0, duration - 0.05);
+      // Seeking beyond buffered data can leave a blank player waiting for an
+      // ad segment to download. Seek only when the end is already available,
+      // and at most once per source; otherwise retain the playback fallback.
+      if (session.soughtSource !== source && now - lastSeek >= 250 &&
+          video.currentTime < duration - 0.1 &&
+          containsTime(video.seekable, target) && containsTime(video.buffered, target)) {
         lastSeek = now;
-        video.currentTime = Math.max(0, duration - 0.05);
+        video.currentTime = target;
+        session.soughtSource = source;
       }
     } catch (_) { /* Some streams reject seeking; accelerated playback remains. */ }
   }
@@ -200,6 +220,7 @@
 
   function applyEnabled(on) {
     enabled = on !== false;
+    syncResponseFilter();
     if (enabled) {
       discoveryObserver.observe(document, { childList: true, subtree: true });
       scan();

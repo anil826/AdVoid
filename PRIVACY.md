@@ -31,6 +31,12 @@ This data never leaves your device. Uninstalling the extension removes it.
   to detect and skip video ads and hide on-page ad elements on YouTube and in
   matching embedded YouTube frames.
 
+The extension also processes known YouTube player-response fields in page memory
+to remove ad placements before playback. It does not save, log, or transmit
+player responses, video URLs, captions, or account information. This bundled
+page-world code has no direct access to extension APIs; the control channel
+carries only the on/off preference.
+
 ## Remote code
 
 AdVoid contains **no remote code**. All logic ships inside the extension package

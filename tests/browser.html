@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>AdVoid response-filter browser tests</title>
+<style>body{font:16px system-ui;max-width:900px;margin:40px auto;padding:0 20px}li{margin:12px 0}.pass{color:#167241}.fail{color:#b02020}</style>
+<h1>AdVoid response-filter browser tests</h1>
+<p>Controlled player-response fixtures using native browser Response and XMLHttpRequest APIs. This does not test live YouTube ad delivery.</p>
+<p id="summary">Running…</p><ol id="results"></ol>
+<script>
+  const nativeFetch = window.fetch.bind(window);
+  const endpoint = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
+  const fixture = { adSlots: [{ad:1}], adPlacements: [{ad:2}],
+    streamingData: {formats:[{url:'https://example.googlevideo.com/content'}]},
+    captions: {language:'en'}, videoDetails: {videoId:'fixture'}, playabilityStatus: {status:'OK'} };
+  // Route test requests to a local fixture; no traffic is sent to YouTube.
+  window.fetch = async function (input, options) {
+    const result = await nativeFetch('/fixture', options);
+    Object.defineProperty(result, 'url', {value:String(input)});
+    return result;
+  };
+</script>
+<script src="/youtube-response.js"></script>
+<script>
+  (async () => {
+    let passed = 0, failed = 0;
+    const state = on => document.dispatchEvent(new CustomEvent('advoid:response-filter-state', {detail:on}));
+    const assert = (condition, message) => {if (!condition) throw new Error(message)};
+    const clean = value => {
+      assert(!('adSlots' in value) && !('adPlacements' in value), 'Ad data remains');
+      assert(value.streamingData.formats[0].url === fixture.streamingData.formats[0].url, 'Content URL changed');
+      assert(value.captions.language === 'en', 'Captions changed');
+    };
+    async function test(name, fn) {
+      const item = document.createElement('li');
+      try { await fn(); item.className = 'pass'; item.textContent = 'PASS: ' + name; passed++; }
+      catch(error) { item.className = 'fail'; item.textContent = 'FAIL: ' + name + ': ' + error.message; failed++; }
+      document.querySelector('#results').append(item);
+    }
+    await test('Startup remains unchanged before stored preference arrives', async () => {
+      window.ytInitialPlayerResponse = structuredClone(fixture);
+      assert(window.ytInitialPlayerResponse.adSlots, 'Filtered before preference');
+    });
+    state(true);
+    await test('Initial response is pruned before player consumes it', () => clean(window.ytInitialPlayerResponse));
+    await test('Fetch JSON keeps content URLs, captions, status and headers', async () => {
+      const response = await fetch(endpoint);
+      assert(!response.bodyUsed && response.status === 200, 'Response metadata changed');
+      assert(response.headers.get('content-type').includes('application/json'), 'Header changed');
+      clean(await response.json());
+      assert(response.bodyUsed, 'Body consumption not recorded');
+    });
+    await test('Fetch text and clone consumption both remove placements', async () => {
+      const response = await fetch(endpoint), clone = response.clone();
+      clean(JSON.parse(await response.text())); clean(await clone.json());
+    });
+    await test('Unrelated endpoints pass through', async () => {
+      assert((await (await fetch('https://www.youtube.com/youtubei/v1/browse')).json()).adSlots, 'Unrelated data filtered');
+    });
+    for (const type of ['', 'json']) await test('Native XHR ' + (type || 'text') + ' response filtering', async () => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/fixture'); xhr.responseType = type;
+      Object.defineProperty(xhr, 'responseURL', {value:endpoint});
+      await new Promise((resolve, reject) => {xhr.onload=resolve; xhr.onerror=reject; xhr.send()});
+      clean(type === 'json' ? xhr.response : JSON.parse(xhr.responseText));
+    });
+    await test('Turning off preserves future ads data', async () => {
+      state(false);
+      assert((await (await fetch(endpoint)).json()).adSlots, 'Disabled filter still active');
+    });
+    document.querySelector('#summary').textContent = `${passed} passed, ${failed} failed`;
+    document.title = `${failed ? 'FAIL' : 'PASS'} — AdVoid browser tests`;
+  })();
+</script>
+</html>
