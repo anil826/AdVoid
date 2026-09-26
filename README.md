@@ -1,93 +1,77 @@
-# 🛡️ AdVoid — YouTube Ad Blocker
+# AdVoid — YouTube Ad Blocker
 
-> Send YouTube ads into the void.
+A lightweight Chrome Manifest V3 extension that combines bundled network rules with YouTube player monitoring and cosmetic ad hiding. No external libraries, remote code, or data collection.
 
-A lightweight Chrome extension (Manifest V3) that blocks, skips, and hides YouTube ads using a combination of **declarative network filtering** and **real-time DOM interaction** — no external libraries, no remote code, no data collection.
+## Version 1.1.0
 
-## Features
+- Reacts to player mutations in a microtask instead of waiting for an animation frame.
+- Keeps Skip controls accessible: hiding their `.video-ads` ancestor previously prevented the extension from clicking them.
+- Checks all matching Skip buttons, ignores hidden/disabled controls, and retries every 100 ms only while the player reports an ad. Chrome may throttle timers in background tabs.
+- Observes player attributes locally; the document observer only watches DOM insertions/removals for player discovery and style recovery.
+- Covers additional display, companion, search, and mobile ad containers without hiding unrelated YouTube promotional UI.
+- Runs in matching embedded frames, including `youtube-nocookie.com` players.
+- Restores mute state and playback speed when ads end, media elements change, or the extension is disabled. Disabled mode stays disabled across page navigation.
 
-- 🚫 **Network-level ad blocking** — blocks requests to major ad-serving domains (`doubleclick.net`, `googlesyndication.com`, `googleadservices.com`, `googletagservices.com`) and YouTube's own ad endpoints (`/pagead/`, `/ptracking`, `/api/stats/ads`) using Chrome's `declarativeNetRequest` API.
-- ⏭️ **Automatic ad skipping** — detects when a video ad is playing and clicks the "Skip" button the moment it appears.
-- 🔇 **Un-skippable ad handling** — mutes un-skippable ads and fast-forwards them at 16× so you never sit through one.
-- 🙈 **On-page ad hiding** — injects CSS at `document_start` to hide banner ads, in-feed ads, overlay ads, promoted videos, and masthead ads before they render.
-- 🔊 **State restoration** — remembers your playback rate and mute state before an ad and restores them exactly once the ad ends (it never unmutes a video you muted yourself).
-- 📊 **Ads-blocked counter** — a popup shows a live count of ads skipped, with an on/off toggle.
-- ⚡ **Performance-friendly** — uses a `MutationObserver` gated behind `requestAnimationFrame` instead of aggressive polling, and handles YouTube's SPA navigation (`yt-navigate-finish`) without re-injecting.
+## How it works
 
-## How It Works
-
-The extension operates in three coordinated layers:
-
-| Layer | File | Role |
+| Layer | File | Behavior |
 |---|---|---|
-| Network filtering | `rules.json` | Static `declarativeNetRequest` rules that block ad/tracking requests before they leave the browser. |
-| Page interaction | `content.js` | Runs on `youtube.com` at `document_start`. Hides ad elements with injected CSS, detects the player's `ad-showing` state, clicks skip buttons, and mutes/fast-forwards un-skippable ads. |
-| Coordination | `background.js` | Service worker that enables/disables the ruleset with the toggle and tracks the ads-blocked count in `chrome.storage.local`. |
+| Network | `rules.json` | Chrome blocks requests matching the bundled advertising domain and YouTube endpoint rules before they load. |
+| Player and page | `content.js` | Hides known cosmetic ad containers, observes ad-state classes, and clicks available Skip buttons. |
+| Fallback | `content.js` | For a separate finite ad clip up to five minutes long, attempts to seek near its end and plays at 16× while muted. |
+| State | `background.js` | Synchronizes the ruleset with the toggle and stores the local counter. |
+| Controls | `popup.html`, `popup.js`, `popup.css` | Displays the toggle and counter. |
 
-The popup (`popup.html` / `popup.js` / `popup.css`) provides the on/off switch and the animated stats counter. All state lives in `chrome.storage.local`, so the toggle and counter stay in sync across the popup, background worker, and every open YouTube tab.
+The fallback requires `ad-showing`, ready media metadata, and a source different from the last observed content source. `ad-interrupting` alone, lingering ad UI, or a short video duration do not trigger a seek. If the known content source returns before the ad class disappears, playback settings are restored immediately. These checks reduce source-transition mistakes; YouTube's undocumented ad classes are not an absolute guarantee.
 
-### Ad detection strategy
+The popup counter records handled ad sessions when the player leaves ad mode. An uninterrupted multi-ad break may count as one session. Network-blocked requests and cosmetically hidden ads are not included.
 
-Video ads are detected **only** via the live `ad-showing` / `ad-interrupting` classes on the player element — not by the presence of `.ytp-ad-*` containers, which linger in the DOM after an ad ends and would cause false positives (e.g. leaving the real video muted). Fast-forwarding is additionally guarded by a duration check (≤ 5 minutes) so a mis-timed detection during a video source swap can never seek or speed up the actual video.
+## Install or update
 
-## Installation
+Requires Chrome 105+ or a compatible Chromium browser.
 
-AdVoid is not on the Chrome Web Store — install it in developer mode:
+1. Open `chrome://extensions/` and enable **Developer mode**.
+2. Select **Load unpacked** and choose this project folder, containing `manifest.json`.
+3. If already loaded, click the extension's **Reload** button instead.
+4. Refresh existing YouTube tabs and pages containing YouTube embeds so they receive the new content script.
 
-1. **Download** — clone this repository or download it as a ZIP and extract it:
-   ```bash
-   git clone https://github.com/anil826/AdVoid.git
-   ```
-2. **Open the extensions page** — go to `chrome://extensions/` (or `edge://extensions/` on Microsoft Edge).
-3. **Enable Developer mode** — toggle the switch in the top-right corner.
-4. **Load the extension** — click **Load unpacked** and select the project folder (the one containing `manifest.json`).
-5. **Done** — open YouTube and enjoy. Click the AdVoid icon in the toolbar to see the ads-blocked counter or to toggle it off.
+The older `AdVoid-v1.0.x.zip` archives do not contain these changes. Load the project folder to use version 1.1.0.
 
-Works on any Chromium-based browser that supports Manifest V3 (Chrome, Edge, Brave, Opera, Vivaldi).
+## Verification
 
-## Project Structure
+Run the dependency-free automated regression suite:
 
-```
-AdVoid/
-├── manifest.json     # Extension manifest (MV3)
-├── rules.json        # declarativeNetRequest blocking rules
-├── background.js     # Service worker — ruleset toggle + stats
-├── content.js        # YouTube page script — skip/mute/hide ads
-├── popup.html        # Popup UI
-├── popup.css         # Popup styling (dark theme)
-└── popup.js          # Popup logic — toggle + animated counter
+```sh
+node --test tests/content.test.cjs
 ```
 
-## Permissions Explained
+The suite runs the actual content script against simulated DOM/media/Chrome APIs. It covers prompt skip handling, hidden and disabled buttons, source-transition guards, playback restoration, media replacement, startup before the document root exists, disabled navigation, ad-only retries, and manifest resources. It does not simulate YouTube's servers or prove live blocking effectiveness.
 
-| Permission | Why it's needed |
-|---|---|
-| `declarativeNetRequest` | Apply the static ad-blocking rules in `rules.json`. |
-| `storage` | Persist the on/off state and the ads-blocked counter. |
-| `scripting` | Content-script support on YouTube pages. |
-| Host: `*://*.youtube.com/*` | Run the ad-skipping content script on YouTube. |
-| Host: `*://*.doubleclick.net/*` | Block requests to Google's primary ad server. |
+After reloading the extension, manually check:
 
-**Privacy:** AdVoid collects no data, makes no network requests of its own, and runs entirely locally. The only thing it stores is a boolean (enabled/disabled) and a number (ads blocked) in your browser's local extension storage.
+- A skippable pre-roll and a mid-roll: Skip should activate as soon as YouTube makes the button available.
+- An unskippable separate ad clip: verify fallback handling and that content resumes at the previous volume/mute state and playback speed.
+- A short normal video, live stream, and a Shorts session: verify normal content is not skipped or accelerated.
+- Disable during an ad, then navigate within YouTube: speed/sound should restore and cosmetic filtering should stay off.
+- Standard and privacy-enhanced YouTube embeds on other sites.
+- Multiple ads in a break, full-screen playback, and returning from a background tab.
 
-## Limitations
+## Coverage and limitations
 
-- YouTube frequently changes its ad delivery and player markup; selectors and detection logic may need occasional updates.
-- Server-side ad injection (ads stitched directly into the video stream) cannot be blocked at the network level — the content script's mute + fast-forward fallback handles most of these.
-- YouTube Premium features, obviously, are not included. 😄
+This is a YouTube-focused extension, not a maintained universal filter-list blocker. The bundled advertising-domain network rules also affect matching requests on other sites, but cosmetic filtering and video skipping run only on YouTube and its privacy-enhanced embeds.
 
-## Contributing
+No guarantee is made that every ad will disappear. YouTube changes its markup and delivery behavior, may reject seeking or programmatic clicks, and can deliver ads in the same media stream as content. Same-source ads and unknown/live durations are deliberately not fast-forwarded; available Skip controls can still be clicked. Ads longer than five minutes also rely on Skip controls. Creator sponsorships inside a video are not detected. Network filtering does not distinguish ads from content sharing the same streaming URL, so the extension does not blanket-block YouTube's video CDN.
 
-Contributions are welcome! If YouTube changes its markup and something stops working, open an issue or a pull request. Good first contributions:
+## Permissions and privacy
 
-- Updating the CSS hide-selectors in `content.js` when new ad containers appear.
-- Adding ad/tracking domains to `rules.json`.
-- Improving skip-button detection.
+- `declarativeNetRequest`: apply the bundled blocking rules.
+- `storage`: save the enabled preference and local counter.
+- Content-script matches for `youtube.com` and `youtube-nocookie.com`: detect and handle ads in pages and matching frames.
 
-## Disclaimer
+No browsing history or video data is transmitted or persisted. See [PRIVACY.md](PRIVACY.md).
 
-This project is for **educational purposes** — it demonstrates Manifest V3 extension development, the `declarativeNetRequest` API, MutationObserver-based DOM monitoring, and SPA-aware content scripts. Blocking ads may be against YouTube's Terms of Service in your region. If you enjoy a creator's content, consider supporting them directly. Use at your own discretion.
+Chrome documentation: [content scripts and matching frames](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts), [declarative network rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest).
 
 ## License
 
-Released under the [MIT License](LICENSE) — free to use, modify, and distribute.
+[MIT](LICENSE).

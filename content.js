@@ -1,303 +1,235 @@
-/*
- * AdVoid — content script
- * Runs at document_start on youtube.com.
- * Handles: video ad skipping, overlay/banner hiding, SPA re-init.
- */
+/* AdVoid: event-driven YouTube ad handling, including embedded players. */
 (() => {
   "use strict";
-
-  // Guard against double injection on the same document.
   if (window.__adVoidLoaded) return;
   window.__adVoidLoaded = true;
 
   const STYLE_ID = "advoid-style";
-  let ENABLED = true;
-
-  // ---------------------------------------------------------------------------
-  // 1. Static CSS injection (overlay / banner / feed ads) — inject ASAP.
-  // ---------------------------------------------------------------------------
+  const PLAYER_SELECTOR = "#movie_player, .html5-video-player";
+  // Never hide .video-ads: it contains the controls needed to skip video ads.
   const HIDE_SELECTORS = [
-    "ytd-ad-slot-renderer",
-    "ytd-in-feed-ad-layout-renderer",
-    "ytd-banner-promo-renderer",
-    "ytd-statement-banner-renderer",
-    "ytd-promoted-sparkles-web-renderer",
-    "ytd-promoted-video-renderer",
-    "ytd-compact-promoted-video-renderer",
-    "ytd-display-ad-renderer",
+    "ytd-ad-slot-renderer", "ytd-in-feed-ad-layout-renderer",
+    "ytd-promoted-sparkles-web-renderer", "ytd-promoted-video-renderer",
+    "ytd-compact-promoted-video-renderer", "ytd-display-ad-renderer",
+    "ytd-promoted-sparkles-text-search-renderer", "ytd-action-companion-ad-renderer",
+    "ytd-companion-slot-renderer", "ytd-engagement-panel-section-list-renderer[target-id='engagement-panel-ads']",
     "ytd-rich-item-renderer:has(ytd-ad-slot-renderer)",
-    "#player-ads",
-    "#masthead-ad",
-    ".video-ads",
-    ".ytp-ad-overlay-container",
-    ".ytp-ad-overlay-slot",
-    ".ytp-ad-progress-list",
-    ".ytp-suggested-action",
-    "ytmusic-mealbar-promo-renderer"
+    "ytm-ad-slot-renderer", "ytm-promoted-sparkles-web-renderer",
+    "ytm-companion-ad-renderer", "#player-ads", "#masthead-ad",
+    ".ytp-ad-overlay-container", ".ytp-ad-overlay-slot", ".ytp-ad-image-overlay"
   ];
+  const SKIP_SELECTOR = [
+    ".ytp-ad-skip-button-modern", ".ytp-ad-skip-button",
+    ".ytp-skip-ad-button", ".ytp-ad-skip-button-slot button"
+  ].join(",");
+  const MEDIA_EVENTS = ["loadedmetadata", "durationchange", "timeupdate", "playing", "emptied"];
+  let enabled = false;
+  let player = null;
+  let video = null;
+  let session = null;
+  let contentSource = "";
+  let queued = false;
+  let retryTimer = null;
+  let lastButton = null;
+  let lastClick = -Infinity;
+  let lastSeek = -Infinity;
 
   function injectStyle() {
-    try {
-      if (document.getElementById(STYLE_ID)) return;
-      const css = HIDE_SELECTORS.join(",\n") + " { display: none !important; }";
-      const style = document.createElement("style");
-      style.id = STYLE_ID;
-      style.textContent = css;
-      (document.head || document.documentElement).appendChild(style);
-    } catch (_) { /* head not ready yet — retried by observer */ }
-  }
-  injectStyle();
-
-  function setStyleEnabled(on) {
-    try {
-      const el = document.getElementById(STYLE_ID);
-      if (on) {
-        if (!el) injectStyle();
-      } else if (el) {
-        el.remove();
-      }
-    } catch (_) {}
+    if (!enabled || !document.documentElement || document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = HIDE_SELECTORS.join(",\n") + " { display: none !important; }";
+    (document.head || document.documentElement).appendChild(style);
   }
 
-  // ---------------------------------------------------------------------------
-  // Stats messaging (debounced so a single ad = a single count).
-  // ---------------------------------------------------------------------------
-  let lastCountedAt = 0;
-  function reportAdSkipped() {
-    const now = Date.now();
-    if (now - lastCountedAt < 1500) return; // collapse rapid re-detections
-    lastCountedAt = now;
-    try {
-      chrome.runtime.sendMessage({ type: "AD_SKIPPED" }, () => void chrome.runtime.lastError);
-    } catch (_) {}
+  function inAd() {
+    return !!player && (player.classList.contains("ad-showing") ||
+      player.classList.contains("ad-interrupting"));
   }
 
-  // ---------------------------------------------------------------------------
-  // 2. Video ad handling.
-  // ---------------------------------------------------------------------------
-  // Classes YouTube puts on the player ONLY while an ad is actually playing,
-  // and removes the instant real content resumes. This is the reliable signal.
-  const AD_STATE_CLASSES = ["ad-showing", "ad-interrupting"];
-  const SKIP_BUTTON_SELECTORS = [
-    ".ytp-ad-skip-button-modern",
-    ".ytp-ad-skip-button",
-    ".ytp-skip-ad-button",
-    ".ytp-ad-skip-button-slot button",
-    "button.ytp-ad-skip-button-modern"
-  ];
-
-  // Saved player state so we can restore after the ad.
-  let saved = null; // { rate, muted }
-
-  function getVideo() {
-    try {
-      return document.querySelector("video.html5-main-video") ||
-             document.querySelector("#movie_player video") ||
-             document.querySelector("video");
-    } catch (_) { return null; }
+  function clearRetry() {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
   }
 
-  function getPlayer() {
-    try {
-      const p = document.getElementById("movie_player") ||
-                document.querySelector(".html5-video-player");
-      return (p && typeof p.mute === "function") ? p : null;
-    } catch (_) { return null; }
+  // One retry timer only during an ad. Unlike rAF, this also works in hidden
+  // tabs (subject to Chrome's normal background timer throttling).
+  function retryAd() {
+    if (retryTimer !== null) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      scheduleScan();
+    }, 100);
   }
 
-  // Read mute state through the player (keeps UI + element in sync).
-  function isMuted(video) {
-    try {
-      const p = getPlayer();
-      if (p && typeof p.isMuted === "function") return !!p.isMuted();
-    } catch (_) {}
-    return !!(video && video.muted);
+  function restore(target) {
+    if (!session || !target) return;
+    try { target.playbackRate = session.rate; } catch (_) {}
+    try { target.muted = session.muted; } catch (_) {}
   }
 
-  // Mute/unmute via the player API when possible, falling back to the element.
-  // Directly toggling video.muted alone desyncs YouTube's player state, which
-  // leaves the real video silent until the user nudges the volume.
-  function setMuted(video, mute) {
-    try {
-      const p = getPlayer();
-      if (p) {
-        if (mute && typeof p.mute === "function") p.mute();
-        else if (!mute && typeof p.unMute === "function") p.unMute();
-      }
-    } catch (_) {}
-    try { if (video) video.muted = !!mute; } catch (_) {}
+  function endSession(count) {
+    clearRetry();
+    if (!session) return;
+    restore(session.video);
+    if (video !== session.video) restore(video);
+    const handled = session.handled;
+    session = null;
+    lastButton = null;
+    lastClick = lastSeek = -Infinity;
+    if (count && handled) {
+      try {
+        chrome.runtime.sendMessage({ type: "AD_SKIPPED" }, () => void chrome.runtime.lastError);
+      } catch (_) {}
+    }
   }
 
-  function adIsShowing() {
-    try {
-      const player = document.getElementById("movie_player") ||
-                     document.querySelector(".html5-video-player");
-      if (!player || !player.classList) return false;
-      // Detect ONLY by the live ad-state class. Do NOT use the .ytp-ad-*
-      // container elements — those linger in the DOM after the ad ends, which
-      // would keep the real video muted/detected as an ad forever.
-      return AD_STATE_CLASSES.some((c) => player.classList.contains(c));
-    } catch (_) { return false; }
+  function visible(button) {
+    if (button.disabled || button.getAttribute("aria-disabled") === "true" ||
+        !button.getClientRects().length) return false;
+    const style = getComputedStyle(button);
+    return style.visibility !== "hidden" && style.visibility !== "collapse" && style.display !== "none";
   }
 
   function clickSkip() {
-    let clicked = false;
-    for (const sel of SKIP_BUTTON_SELECTORS) {
-      try {
-        const btn = document.querySelector(sel);
-        if (btn && btn.offsetParent !== null) {
-          btn.click();
-          clicked = true;
-          break;
-        }
-      } catch (_) {}
+    for (const button of player.querySelectorAll(SKIP_SELECTOR)) {
+      if (!visible(button)) continue;
+      const now = performance.now();
+      if (button === lastButton && now - lastClick < 250) continue;
+      lastButton = button;
+      lastClick = now;
+      button.click();
+      return true;
     }
-    return clicked;
+    return false;
   }
 
   function handleAd() {
-    if (!ENABLED) return;
-    const video = getVideo();
-    if (!video) return;
-
-    if (!video.__adVoidBound) {
-      bindVideoEvents(video);
-    }
-
-    if (!adIsShowing()) {
-      // Ad finished — restore state.
-      if (saved) {
-        try { video.playbackRate = saved.rate; } catch (_) {}
-        if (saved.muted) {
-          // User had it muted before the ad; leave it muted and we're done.
-          saved = null;
-        } else {
-          // Restore sound. Re-assert across scans until it actually takes
-          // effect (the media element can be swapped on resume), then stop so
-          // we never fight a later manual mute by the user.
-          setMuted(video, false);
-          if (!video.muted) saved = null;
-        }
-      }
+    if (!enabled || !player) return;
+    if (!inAd()) {
+      endSession(true);
+      if (video && video.readyState >= 1) contentSource = video.currentSrc;
       return;
     }
-
-    // Ad is showing.
-    if (!saved) {
-      saved = { rate: video.playbackRate || 1, muted: isMuted(video) };
-      reportAdSkipped();
+    retryAd();
+    if (video && !session) {
+      session = { video, rate: video.playbackRate, muted: video.muted, handled: false };
     }
+    if (clickSkip()) {
+      if (session) session.handled = true;
+      return;
+    }
+    if (!video || !session) return;
 
-    // Try the reliable path first: a skip button. This never touches playback.
-    if (clickSkip()) return;
-
-    // Un-skippable ad: mute it (via the player API) so the user hears nothing.
-    if (!isMuted(video)) setMuted(video, true);
-
-    // Fast-forward ONLY when we are confident this is a short ad clip, so a
-    // mis-timed detection during a source swap can never speed up or seek the
-    // real video (which would show as an endless spinner / instant-ended video).
+    // ad-interrupting can precede the media swap. A short duration alone does
+    // not prove this is an ad: ordinary YouTube videos can be short too.
+    const source = video.currentSrc;
+    const duration = video.duration;
+    const confirmedClip = player.classList.contains("ad-showing") &&
+      source && source !== contentSource && video.readyState >= 1 &&
+      Number.isFinite(duration) && duration > 0 && duration <= 300;
+    if (!confirmedClip) {
+      // Restore immediately if content returns before the ad class clears.
+      restore(video);
+      return;
+    }
+    try { video.muted = true; } catch (_) {}
+    try { video.playbackRate = 16; } catch (_) {}
+    session.handled = true;
     try {
-      const dur = video.duration;
-      const looksLikeAd = Number.isFinite(dur) && dur > 0 && dur <= 300; // ads are short
-      if (looksLikeAd) {
-        if (video.playbackRate !== 16) video.playbackRate = 16;
-        if (video.currentTime < dur - 0.15) {
-          // Advance toward the end. If YouTube rejects the seek, the 16x rate
-          // still clears the ad in a moment without stalling the player.
-          video.currentTime = dur - 0.1;
-        }
+      const now = performance.now();
+      if (now - lastSeek >= 250 && video.currentTime < duration - 0.1) {
+        lastSeek = now;
+        video.currentTime = Math.max(0, duration - 0.05);
       }
-    } catch (_) {}
+    } catch (_) { /* Some streams reject seeking; accelerated playback remains. */ }
   }
 
-  // ---------------------------------------------------------------------------
-  // 3. Scheduling — MutationObserver + rAF gate (no aggressive setInterval).
-  // ---------------------------------------------------------------------------
-  let scanQueued = false;
-  function scheduleScan() {
-    if (scanQueued) return;
-    scanQueued = true;
-    requestAnimationFrame(() => {
-      scanQueued = false;
-      handleAd();
-    });
-  }
-
-  let observer = null;
-  function startObserver() {
-    try {
-      if (observer) return;
-      observer = new MutationObserver(() => {
-        injectStyle();   // re-assert style if YouTube stripped it
-        scheduleScan();
-      });
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class"]
-      });
-    } catch (_) {}
-  }
-  function stopObserver() {
-    try {
-      if (observer) { observer.disconnect(); observer = null; }
-    } catch (_) {}
-  }
-
-  // Also bind to the video's own timeupdate — cheap and fires during ads.
-  function bindVideoEvents(video) {
-    if (!video) video = getVideo();
-    if (!video || video.__adVoidBound) return;
-    try {
-      video.__adVoidBound = true;
-      video.addEventListener("timeupdate", scheduleScan, { passive: true });
-      video.addEventListener("loadedmetadata", scheduleScan, { passive: true });
-      video.addEventListener("durationchange", scheduleScan, { passive: true });
-      video.addEventListener("play", scheduleScan, { passive: true });
-      video.addEventListener("playing", scheduleScan, { passive: true });
-    } catch (_) {}
-  }
-
-  // ---------------------------------------------------------------------------
-  // 4. SPA navigation handling.
-  // ---------------------------------------------------------------------------
-  function reinit() {
-    injectStyle();
-    bindVideoEvents();
+  function mediaChanged() {
+    if (session && (!inAd() || (video && video.currentSrc === contentSource))) restore(video);
     scheduleScan();
   }
-  ["yt-navigate-finish", "yt-page-data-updated", "spfdone"].forEach((evt) => {
-    try { document.addEventListener(evt, reinit, { passive: true }); } catch (_) {}
+
+  const playerObserver = new MutationObserver(scheduleScan);
+  function bindPlayer() {
+    const nextPlayer = player && player.isConnected ? player : document.querySelector(PLAYER_SELECTOR);
+    if (nextPlayer !== player) {
+      endSession(false);
+      playerObserver.disconnect();
+      player = nextPlayer;
+      contentSource = "";
+      if (player) playerObserver.observe(player, {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ["class", "style", "hidden", "disabled", "aria-disabled", "src"]
+      });
+    }
+    const nextVideo = player && (player.querySelector("video.html5-main-video") || player.querySelector("video"));
+    if (nextVideo !== video) {
+      if (video) MEDIA_EVENTS.forEach((event) => video.removeEventListener(event, mediaChanged));
+      // Restore the detached element too; YouTube can reuse it later.
+      restore(video);
+      video = nextVideo;
+      if (video) {
+        MEDIA_EVENTS.forEach((event) => video.addEventListener(event, mediaChanged, { passive: true }));
+        if (session) restore(video);
+      }
+    }
+  }
+
+  function scan() {
+    if (!enabled) return;
+    injectStyle();
+    bindPlayer();
+    handleAd();
+  }
+
+  function scheduleScan() {
+    if (!enabled || queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      scan();
+    });
+  }
+
+  // Global observer only discovers/replaces players and restores our style.
+  // Attribute churn in comments, chat and recommendations is ignored.
+  const discoveryObserver = new MutationObserver(() => {
+    if (!player || !player.isConnected || !document.getElementById(STYLE_ID)) scheduleScan();
   });
 
-  // ---------------------------------------------------------------------------
-  // Enable/disable wiring from popup/background.
-  // ---------------------------------------------------------------------------
   function applyEnabled(on) {
-    ENABLED = !!on;
-    setStyleEnabled(ENABLED);
-    if (ENABLED) { startObserver(); reinit(); }
-    else { stopObserver(); }
+    enabled = on !== false;
+    if (enabled) {
+      discoveryObserver.observe(document, { childList: true, subtree: true });
+      scan();
+    } else {
+      discoveryObserver.disconnect();
+      playerObserver.disconnect();
+      endSession(false);
+      if (video) MEDIA_EVENTS.forEach((event) => video.removeEventListener(event, mediaChanged));
+      player = video = null;
+      contentSource = "";
+      document.getElementById(STYLE_ID)?.remove();
+    }
   }
 
+  ["yt-navigate-finish", "yt-page-data-updated", "spfdone", "DOMContentLoaded", "pageshow"]
+    .forEach((event) => document.addEventListener(event, scheduleScan, { passive: true }));
+  document.addEventListener("visibilitychange", scheduleScan, { passive: true });
+
+  // Wait for the preference before modifying anything. Ignore stale initial
+  // reads after a toggle; disabled stays disabled during SPA navigation.
+  let preferenceChanged = false;
   try {
-    chrome.storage.local.get({ enabled: true }, (res) => {
-      if (chrome.runtime.lastError) { applyEnabled(true); return; }
-      applyEnabled(res.enabled);
-    });
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes.enabled) applyEnabled(changes.enabled.newValue);
+      if (area === "local" && changes.enabled) {
+        preferenceChanged = true;
+        applyEnabled(changes.enabled.newValue);
+      }
     });
-  } catch (_) {
-    applyEnabled(true);
-  }
-
-  // Kick off once the DOM is minimally ready.
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", reinit, { once: true });
-  }
-  startObserver();
-  reinit();
+    chrome.storage.local.get({ enabled: true }, (res) => {
+      if (!preferenceChanged) applyEnabled(chrome.runtime.lastError ? true : res.enabled);
+    });
+  } catch (_) { applyEnabled(true); }
 })();

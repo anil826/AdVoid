@@ -1,6 +1,6 @@
 # Privacy Policy — AdVoid
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-09-26_
 
 AdVoid ("the extension") is designed to protect your attention **and** your privacy.
 
@@ -27,8 +27,9 @@ This data never leaves your device. Uninstalling the extension removes it.
   content of your requests.
 - **storage** — to save the on/off toggle and the local ads-blocked counter
   described above.
-- **Access to youtube.com** (via the content script) — to detect and skip video
-  ads and hide on-page ad elements while you browse YouTube.
+- **Access to youtube.com and youtube-nocookie.com** (via the content script) —
+  to detect and skip video ads and hide on-page ad elements on YouTube and in
+  matching embedded YouTube frames.
 
 ## Remote code
 
